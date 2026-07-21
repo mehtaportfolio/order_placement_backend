@@ -657,10 +657,17 @@ function handleTick(msg) {
 
         // Only log unknown symbols once to reduce noise
         const normalizedForCheck = normalizeSymbol(symbol);
-        const isKnown = equityPositionSymbols.has(symbol) || equityPositionSymbols.has(normalizedForCheck) || equityPositionSymbols.has(normalizedForCheck + '-EQ');
+        const dynamicSymbolNames = Array.from(dynamicSubscriptions.values()).map((item) => item.symbol);
+        const isKnown = equityPositionSymbols.has(symbol) ||
+          equityPositionSymbols.has(normalizedForCheck) ||
+          equityPositionSymbols.has(normalizedForCheck + '-EQ') ||
+          dynamicSymbolNames.includes(symbol) ||
+          dynamicSymbolNames.includes(normalizedForCheck) ||
+          dynamicSymbolNames.includes(normalizedForCheck + '-EQ');
+
         if (!isKnown) {
           if (!unknownSymbolsLogged.has(symbol)) {
-            console.warn(`[Angel] Tick symbol '${symbol}' not found in equityPositionSymbols set (${equityPositionSymbols.size}). Ignoring.`);
+            console.warn(`[Angel] Tick symbol '${symbol}' not found in equityPositionSymbols or dynamicSubscriptions (${equityPositionSymbols.size} equity symbols, ${dynamicSymbolNames.length} dynamic symbols). Ignoring.`);
             unknownSymbolsLogged.add(symbol);
           }
           return;
@@ -674,7 +681,12 @@ function handleTick(msg) {
         };
 
         const previousTick = lastTicks[symbol];
+        const normalizedSymbol = normalizeSymbol(symbol);
+
+        // Cache tick under normalized and -EQ forms too, to support UI lookups
         lastTicks[symbol] = tick;
+        lastTicks[normalizedSymbol] = tick;
+        lastTicks[`${normalizedSymbol}-EQ`] = tick;
 
         broadcast(tick);
 
