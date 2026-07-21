@@ -1,0 +1,15 @@
+import express from 'express';
+import * as orderController from '../controllers/orderController.js';
+
+const router = express.Router();
+
+router.get('/distinct-brokers-accounts', orderController.getDistinctBrokersAndAccounts);
+router.get('/account-status', orderController.getAccountStatus);
+router.get('/distinct-stock-names', orderController.getDistinctStockNames);
+router.get('/open-transactions', orderController.getOpenTransactions);
+router.post('/place-sell-order', orderController.placeSellOrder);
+router.get('/order-status', orderController.getOrderStatus);
+router.get('/live-price/:symbol', orderController.getLivePrice);
+router.post('/subscribe-stock', orderController.subscribeStock);
+
+export default router;
