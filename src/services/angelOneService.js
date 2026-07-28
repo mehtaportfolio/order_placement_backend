@@ -364,13 +364,50 @@ export async function syncMarketData() {
     }
 }
 
+export function normalizeSymbol(symbol) {
+    if (!symbol) return symbol;
+    const normalized = symbol.toString().trim().toUpperCase();
+    return normalized.endsWith('-EQ') ? normalized.slice(0, -3) : normalized;
+}
+
 export function buildPositionSyncPlan(formatted, existingToday, options = {}) {
     const forceRefresh = Boolean(options?.forceRefresh);
-    const existingMap = new Map((existingToday || []).map((row) => [row.symbol, row]));
+    const existingMap = new Map(
+        (existingToday || []).map((row) => [normalizeSymbol(row.symbol), row])
+    );
     const inserts = [];
     const updates = [];
 
+    const normalizedFormattedMap = new Map();
     (formatted || []).forEach((item) => {
+        const normalizedSymbol = normalizeSymbol(item.symbol);
+        const existingItem = normalizedFormattedMap.get(normalizedSymbol);
+        if (!existingItem) {
+            normalizedFormattedMap.set(normalizedSymbol, {
+                ...item,
+                symbol: normalizedSymbol
+            });
+            return;
+        }
+
+        const qty1 = Number(existingItem.quantity);
+        const qty2 = Number(item.quantity);
+        const avg1 = Number(existingItem.average_price);
+        const avg2 = Number(item.average_price);
+        const totalQty = qty1 + qty2;
+        const weightedAvg = totalQty > 0
+            ? Number(((qty1 * avg1 + qty2 * avg2) / totalQty).toFixed(2))
+            : 0;
+
+        normalizedFormattedMap.set(normalizedSymbol, {
+            ...existingItem,
+            symbol: normalizedSymbol,
+            quantity: totalQty,
+            average_price: weightedAvg
+        });
+    });
+
+    Array.from(normalizedFormattedMap.values()).forEach((item) => {
         const existing = existingMap.get(item.symbol);
         if (!existing) {
             inserts.push(item);
@@ -475,7 +512,8 @@ export async function fetchTodayBuyTrades(options = {}) {
         todayOrders.forEach((order) => {
             if (!shouldCountOrder(order)) return;
 
-            const symbol = order.tradingsymbol || order.tradingSymbol || order.symbol || order.symbolname || '';
+            const rawSymbol = order.tradingsymbol || order.tradingSymbol || order.symbol || order.symbolname || '';
+            const symbol = normalizeSymbol(rawSymbol);
             const qty = getFilledQuantity(order);
             const price = getOrderPrice(order);
             const txnType = String(order.transactiontype || order.transactionType || '').toUpperCase();
@@ -506,21 +544,10 @@ export async function fetchTodayBuyTrades(options = {}) {
 
             const weightedAverage = lots.reduce((sum, lot) => sum + (lot.qty * lot.price), 0) / remainingQty;
 
-            // Normalize symbol for Angel One: if it ends with '-EQ', remove that suffix before storing
-            let writeSymbol = symbol;
-            try {
-                if (typeof writeSymbol === 'string' && writeSymbol.toUpperCase().endsWith('-EQ')) {
-                    writeSymbol = writeSymbol.slice(0, -3);
-                }
-            } catch (e) {
-                // If anything goes wrong, fall back to original symbol
-                writeSymbol = symbol;
-            }
-
             formatted.push({
                 broker: "angel",
                 account_id: clientId,
-                symbol: writeSymbol,
+                symbol,
                 isin: null,
                 quantity: Math.round(remainingQty),
                 average_price: Number(weightedAverage.toFixed(2)),
@@ -977,6 +1004,51 @@ export async function placeSellOrder(symbol, token, quantity, price) {
         }
     } catch (error) {
         log(`Angel One placeOrder error: ${error.message}`, 'ERROR');
+        throw error;
+    }
+}
+
+/**
+ * Get Order History from Angel One
+ */
+export async function getOrderHistory() {
+    ensureSmartApi();
+    if (!sessionData) {
+        const loginResult = await login();
+        if (!loginResult.success) throw new Error("Angel One login failed");
+    }
+
+    try {
+        const response = await smartApi.getOrderBook();
+        if (response.status && response.data) {
+            return (response.data || [])
+                .map((order) => {
+                    const transactionType = String(order.transactiontype || order.transaction_type || order.order_type || '').trim().toUpperCase();
+                    const normalizedType = transactionType === 'BUY' ? 'BUY' : transactionType === 'SELL' ? 'SELL' : null;
+
+                    if (!normalizedType) {
+                        return null;
+                    }
+
+                    return {
+                        order_id: String(order.orderid || order.order_id || order.id || ''),
+                        broker: 'angel',
+                        account_id: order.accountid || null,
+                        symbol: order.tradingsymbol || order.symbol || '',
+                        quantity: Number(order.quantity || order.filledshares || 0),
+                        price: Number(order.averageprice || order.price || 0),
+                        status: order.status,
+                        average_price: Number(order.averageprice || order.price || 0),
+                        transaction_type: normalizedType,
+                    };
+                })
+                .filter(Boolean)
+                .filter((order) => order.order_id && order.transaction_type === 'SELL');
+        }
+
+        throw new Error(response.message || "Failed to fetch orderbook from Angel One");
+    } catch (error) {
+        log(`Angel One getOrderHistory error: ${error.message}`, 'ERROR');
         throw error;
     }
 }

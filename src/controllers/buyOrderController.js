@@ -12,7 +12,7 @@ export async function getStockMaster(req, res) {
   try {
     // Use fetchAllRows to page through the table and return all rows (no 1000-row cap)
     const { data, error } = await fetchAllRows(supabase, 'stock_master', {
-      select: 'stock_name, symbol_token',
+      select: 'stock_name, symbol_token, exchange',
       order: { column: 'stock_name', ascending: true },
       chunkSize: 1000 // use 1000-row chunks so pagination continues correctly
     });
@@ -21,7 +21,7 @@ export async function getStockMaster(req, res) {
       return res.status(500).json({ error: error.message || 'Failed to fetch stock master' });
     }
 
-    res.json({ stocks: (data || []).map((row) => ({ name: row.stock_name, token: row.symbol_token })) });
+    res.json({ stocks: (data || []).map((row) => ({ name: row.stock_name, token: row.symbol_token, exchange: row.exchange || '' })) });
   } catch (err) {
     console.error('[BuyOrder] getStockMaster error:', err.message);
     res.status(500).json({ error: err.message || 'Internal error' });
@@ -237,7 +237,7 @@ export async function getOpenPositions(req, res) {
   }
 }
 
-async function savePositionsToTransactionsInternal(today) {
+export async function savePositionsToTransactionsInternal(today) {
   const { data: positions, error: posErr } = await fetchAllRows(supabase, 'equity_positions', {
     select: 'id, broker, account_id, symbol, isin, quantity, average_price, last_price, position_date, exchange',
     filters: [(q) => q.eq('position_date', today)]
@@ -332,48 +332,91 @@ async function savePositionsToTransactionsInternal(today) {
 
   const { data: existingTransactions, error: fetchErr } = await supabase
     .from('stock_transactions')
-    .select('account_name, equity_type, buy_date, stock_name, broker_name');
+    .select('id, account_name, equity_type, buy_date, stock_name, broker_name, quantity, buy_price');
 
   if (fetchErr) {
     console.error('[BuyOrder] Failed to fetch existing transactions:', fetchErr.message);
     return { ok: false, status: 500, error: 'Failed to check for duplicates' };
   }
 
-  const existingSet = new Set();
-  for (const existing of existingTransactions || []) {
-    const key = `${existing.account_name}|${existing.equity_type}|${existing.buy_date}|${existing.stock_name}|${existing.broker_name}`;
-    existingSet.add(key);
-  }
-
   const rowsToInsertFiltered = [];
   const duplicates = [];
+  const updatedRows = [];
 
   for (const row of rowsToInsert) {
-    const key = `${row.account_name}|${row.equity_type}|${row.buy_date}|${row.stock_name}|${row.broker_name}`;
-    if (existingSet.has(key)) {
-      duplicates.push(row);
+    const matchingExisting = (existingTransactions || []).find((existing) => {
+      return existing.account_name === row.account_name
+        && existing.equity_type === row.equity_type
+        && existing.buy_date === row.buy_date
+        && existing.stock_name === row.stock_name
+        && existing.broker_name === row.broker_name;
+    });
+
+    if (matchingExisting) {
+      const existingQuantity = Number(matchingExisting.quantity || 0);
+      const incomingQuantity = Number(row.quantity || 0);
+      const newQuantity = existingQuantity + incomingQuantity;
+
+      if (newQuantity > existingQuantity) {
+        const { error: updateError } = await supabase
+          .from('stock_transactions')
+          .update({
+            quantity: newQuantity,
+            buy_price: ((Number(matchingExisting.buy_price || 0) * existingQuantity) + (Number(row.buy_price || 0) * incomingQuantity)) / newQuantity,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', matchingExisting.id);
+
+        if (updateError) {
+          console.error('[BuyOrder] Failed to update existing transaction:', updateError.message);
+        } else {
+          updatedRows.push({ id: matchingExisting.id, quantity: newQuantity });
+          duplicates.push(row);
+        }
+      } else {
+        duplicates.push(row);
+      }
     } else {
       rowsToInsertFiltered.push(row);
     }
   }
 
-  if (rowsToInsertFiltered.length === 0) {
+  if (rowsToInsertFiltered.length === 0 && updatedRows.length === 0) {
     return { ok: true, inserted: 0, skipped: skippedAccounts.length, duplicates: duplicates.length, message: 'All positions already exist (duplicates)' };
   }
 
-  const { data: inserted, error: insertErr } = await supabase.from('stock_transactions').insert(rowsToInsertFiltered).select();
-  if (insertErr) {
-    console.error('[BuyOrder] savePositionsToTransactions insert error:', insertErr.message || insertErr);
-    return { ok: false, status: 500, error: insertErr.message || 'Failed to insert transactions' };
-  }
+  try {
+    let insertedCount = 0;
 
-  return {
-    ok: true,
-    inserted: (inserted || []).length,
-    rows: inserted,
-    skipped: skippedAccounts.length,
-    duplicates: duplicates.length
-  };
+    for (const row of rowsToInsertFiltered) {
+      const { error: insertError } = await supabase
+        .from('stock_transactions')
+        .insert([row]);
+
+      if (insertError) {
+        if (String(insertError.message || '').includes('duplicate') || String(insertError.message || '').includes('unique')) {
+          console.warn('[BuyOrder] Skipping insert due to duplicate open transaction constraint:', insertError.message);
+          continue;
+        }
+
+        console.error('[BuyOrder] Failed to insert transaction row:', insertError.message);
+        throw insertError;
+      }
+
+      insertedCount += 1;
+    }
+
+    return {
+      ok: true,
+      inserted: insertedCount,
+      updated: updatedRows.length,
+      skipped: skippedAccounts.length,
+      duplicates: duplicates.length
+    };
+  } catch (e) {
+    console.error('[BuyOrder] savePositionsToTransactions unexpected error:', e && e.message ? e.message : e);
+    return { ok: false, status: 500, error: e && e.message ? e.message : 'Unexpected error while inserting transactions' };
+  }
 }
 
 export async function savePositionsToTransactions(req, res) {

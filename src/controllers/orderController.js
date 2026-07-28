@@ -3,6 +3,7 @@ import * as angelService from '../services/angelOneService.js';
 import { fetchAllRows, deleteRows } from '../db/queries.js';
 import { supabase } from '../db/supabaseClient.js';
 import { getLivePrice as getAngelLivePrice, subscribeSingleStock} from '../services/angelLiveService.js';
+import { buildSellSettlementPlan } from '../services/sellSettlementService.js';
 
 /**
  * Get distinct brokers and accounts from stock_transactions
@@ -301,6 +302,18 @@ function looksLikeUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '').trim());
 }
 
+function resolveIncomingTransactionId(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+
+  if (looksLikeUuid(trimmed)) {
+    return trimmed;
+  }
+
+  const numericValue = Number(trimmed);
+  return Number.isInteger(numericValue) && numericValue > 0 ? String(numericValue) : null;
+}
+
 async function resolveTransactionIdForSell({ broker, account_id, symbol, quantity }) {
   const normalizedBroker = String(broker || '').trim().toLowerCase();
   const normalizedAccount = String(account_id || '').trim();
@@ -336,24 +349,40 @@ async function resolveTransactionIdForSell({ broker, account_id, symbol, quantit
   return data?.[0]?.id || null;
 }
 
-async function resolveAngelSymbolToken(symbol) {
+async function resolveAngelSymbolToken(symbol, exchange) {
   const stockName = (symbol || '').trim();
   if (!stockName) {
     return { error: 'Stock symbol is required for Angel One orders' };
   }
 
-  const { data: tokenData, error: tokenError } = await supabase
+  let query = supabase
     .from('stock_master')
-    .select('symbol_token')
-    .eq('stock_name', stockName)
-    .limit(1)
-    .single();
+    .select('symbol_token, exchange')
+    .eq('stock_name', stockName);
 
-  if (tokenError || !tokenData || !tokenData.symbol_token) {
-    return { error: tokenError?.message || 'Angel One symbol token is missing for the selected stock in stock_master' };
+  if (exchange) {
+    query = query.eq('exchange', String(exchange).trim().toUpperCase());
   }
 
-  return { token: tokenData.symbol_token.trim() };
+  const { data, error } = await query.limit(1);
+  const tokenData = data?.[0];
+
+  if (error || !tokenData || !tokenData.symbol_token) {
+    const { data: fallbackData, error: fallbackError } = await supabase
+      .from('stock_master')
+      .select('symbol_token, exchange')
+      .eq('stock_name', stockName)
+      .limit(1);
+
+    const fallbackTokenData = fallbackData?.[0];
+    if (fallbackError || !fallbackTokenData || !fallbackTokenData.symbol_token) {
+      return { error: error?.message || fallbackError?.message || 'Angel One symbol token is missing for the selected stock in stock_master' };
+    }
+
+    return { token: fallbackTokenData.symbol_token.trim(), exchange: fallbackTokenData.exchange || exchange || null };
+  }
+
+  return { token: tokenData.symbol_token.trim(), exchange: tokenData.exchange || exchange || null };
 }
 
 /**
@@ -361,7 +390,7 @@ async function resolveAngelSymbolToken(symbol) {
  */
 export async function placeSellOrder(req, res) {
   try {
-    const { broker, account_id, symbol, quantity, price, transaction_id, order_type } = req.body;
+    const { broker, account_id, symbol, quantity, price, transaction_id, order_type, exchange, transaction_type } = req.body;
 
     if (!broker || !account_id || !symbol || !quantity) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -381,7 +410,7 @@ export async function placeSellOrder(req, res) {
     if (normalizedBroker === 'zerodha') {
       result = await zerodhaService.placeSellOrder(account_id, symbol, quantity, normalizedOrderType, price);
     } else if (normalizedBroker === 'angel' || normalizedBroker === 'angelone') {
-      const { token: resolvedToken, error: tokenError } = await resolveAngelSymbolToken(symbol);
+      const { token: resolvedToken, error: tokenError } = await resolveAngelSymbolToken(symbol, exchange);
       if (tokenError) {
         return res.status(400).json({ error: tokenError });
       }
@@ -393,8 +422,9 @@ export async function placeSellOrder(req, res) {
 
     if (result.success) {
       let resolvedTransactionId = null;
-      if (transaction_id && looksLikeUuid(transaction_id)) {
-        resolvedTransactionId = String(transaction_id).trim();
+      const incomingTransactionId = resolveIncomingTransactionId(transaction_id);
+      if (incomingTransactionId) {
+        resolvedTransactionId = incomingTransactionId;
       }
 
       if (!resolvedTransactionId) {
@@ -406,24 +436,63 @@ export async function placeSellOrder(req, res) {
         return res.status(409).json({ error: 'Unable to resolve the underlying stock transaction for tracking this sell order.' });
       }
 
-      // Store the order in a new 'orders' table for tracking
-      const { error: orderError } = await supabase
-        .from('broker_orders')
-        .insert([{
-          order_id: result.order_id,
-          broker: String(broker).trim(),
-          account_id,
-          symbol,
-          quantity,
-          price,
-          transaction_id: resolvedTransactionId,
-          status: 'OPEN',
-          created_at: new Date().toISOString()
-        }]);
+      if (String(transaction_type || '').trim().toUpperCase() === 'SELL') {
+        // Store the order in a new 'orders' table for tracking
+        const { error: orderError } = await supabase
+          .from('broker_orders')
+          .insert([{
+            order_id: result.order_id,
+            broker: String(broker).trim(),
+            account_id,
+            symbol,
+            quantity,
+            price,
+            transaction_id: resolvedTransactionId,
+            status: 'OPEN',
+            created_at: new Date().toISOString()
+          }]);
 
-      if (orderError) {
-        console.error("Error storing order in DB:", orderError.message, { broker, account_id, symbol, quantity, resolvedTransactionId });
-        return res.status(500).json({ error: "Failed to store broker order", details: orderError.message });
+        if (orderError) {
+          console.error("Error storing order in DB:", orderError.message, { broker, account_id, symbol, quantity, resolvedTransactionId });
+          return res.status(500).json({ error: "Failed to store broker order", details: orderError.message });
+        }
+      }
+
+      // Apply partial-sell settlement to the underlying stock transaction row.
+      const { data: existingRows, error: fetchError } = await supabase
+        .from('stock_transactions')
+        .select('*')
+        .eq('id', resolvedTransactionId)
+        .limit(1);
+
+      if (fetchError) {
+        console.error('Error fetching stock transaction for partial sell settlement:', fetchError.message);
+      } else if (existingRows && existingRows.length > 0) {
+        const existingRow = existingRows[0]
+        const sellDate = new Date().toISOString().split('T')[0]
+        const { updatePayload, remainingRow } = buildSellSettlementPlan({
+          existingRow,
+          soldQuantity: Number(quantity),
+          sellDate,
+          sellPrice: Number(price || 0),
+        })
+
+        const { error: updateError } = await supabase
+          .from('stock_transactions')
+          .update(updatePayload)
+          .eq('id', resolvedTransactionId)
+
+        if (updateError) {
+          console.error('Error updating stock transaction for sell settlement:', updateError.message);
+        } else if (remainingRow) {
+          const { error: insertError } = await supabase
+            .from('stock_transactions')
+            .insert([remainingRow])
+
+          if (insertError) {
+            console.error('Error inserting remaining stock transaction row after partial sell:', insertError.message);
+          }
+        }
       }
 
       // After successful order placement, delete the position from equity_positions if it exists
@@ -495,11 +564,12 @@ export async function getOrderStatus(req, res) {
 
 export const getLivePrice = async (req, res) => {
   const { symbol } = req.params;
+  const { exchange } = req.query;
 
   let ltp = getAngelLivePrice(symbol);
 
   if (ltp == null) {
-    await subscribeSingleStock(symbol);
+    await subscribeSingleStock(symbol, { exchange, stockName: symbol });
 
     return res.json({
       success: true,
@@ -518,7 +588,7 @@ export const getLivePrice = async (req, res) => {
 
 export async function subscribeStock(req, res) {
   try {
-    const { symbol } = req.body;
+    const { symbol, exchange } = req.body;
 
     if (!symbol) {
       return res.status(400).json({
@@ -527,7 +597,7 @@ export async function subscribeStock(req, res) {
       });
     }
 
-    await subscribeSingleStock(`${symbol}-EQ`);
+    await subscribeSingleStock(symbol, { exchange, stockName: symbol });
 
     return res.json({
       success: true

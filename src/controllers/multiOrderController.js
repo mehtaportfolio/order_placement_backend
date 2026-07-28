@@ -1,6 +1,7 @@
 import { supabase } from '../db/supabaseClient.js';
 import * as zerodhaService from '../services/zerodhaService.js';
 import * as angelService from '../services/angelOneService.js';
+import { buildSellSettlementPlan } from '../services/sellSettlementService.js';
 
 const ALLOWED_ACCOUNTS = ['PM', 'PDM', 'PSM'];
 const ALLOWED_BROKERS = ['zerodha', 'angel'];
@@ -258,55 +259,93 @@ export async function placeMultiSellOrder(req, res) {
         }
 
         if (result.success) {
-          const { error: orderError } = await supabase.from('broker_orders').insert([{
-            order_id: result.order_id,
-            broker,
-            account_id,
-            symbol,
-            quantity,
-            price: normalizedOrderType === 'LIMIT' ? price : null,
-            transaction_id,
-            status: 'OPEN',
-            created_at: new Date().toISOString(),
-          }]);
+          const shouldTrackBrokerOrder = String(order.transaction_type || '').trim().toUpperCase() === 'SELL';
 
-          if (orderError) {
-            console.error('Error storing broker order:', orderError.message);
-            summary[brokerKey].failed += 1;
-            summary[brokerKey].errors.push({ symbol, error: `Failed to store broker order: ${orderError.message}` });
-            totalFailed += 1;
-          } else {
-            // After successful order placement, delete the position from equity_positions if it exists
-            // Match by account_id, symbol, and quantity
-            const { data: existingPositions, error: queryError } = await supabase
-              .from('equity_positions')
-              .select('id')
-              .eq('account_id', account_id)
-              .eq('symbol', symbol)
-              .eq('quantity', quantity);
+          if (shouldTrackBrokerOrder) {
+            const { error: orderError } = await supabase.from('broker_orders').insert([{
+              order_id: result.order_id,
+              broker,
+              account_id,
+              symbol,
+              quantity,
+              price: normalizedOrderType === 'LIMIT' ? price : null,
+              transaction_id,
+              status: 'OPEN',
+              created_at: new Date().toISOString(),
+            }]);
 
-            if (queryError) {
-              console.error('Error querying equity_positions:', queryError.message);
-            } else if (existingPositions && existingPositions.length > 0) {
-              // Position exists, delete it
-              const positionId = existingPositions[0].id;
-              const { error: deleteError } = await supabase
-                .from('equity_positions')
-                .delete()
-                .eq('id', positionId);
-              
-              if (deleteError) {
-                console.error('Error deleting equity_positions row:', deleteError.message);
-              } else {
-                console.log(`Deleted equity_positions for ${symbol} (${account_id}) after sell order placement`);
-              }
-            } else {
-              console.log(`No equity_positions found for ${symbol} (${account_id}), proceeding with order`);
+            if (orderError) {
+              console.error('Error storing broker order:', orderError.message);
+              summary[brokerKey].failed += 1;
+              summary[brokerKey].errors.push({ symbol, error: `Failed to store broker order: ${orderError.message}` });
+              totalFailed += 1;
+              continue;
             }
-            
-            summary[brokerKey].success += 1;
-            totalSuccess += 1;
           }
+
+          const { data: existingRows, error: fetchError } = await supabase
+            .from('stock_transactions')
+            .select('*')
+            .eq('id', transaction_id)
+            .limit(1);
+
+          if (fetchError) {
+            console.error('Error fetching stock transaction for multi sell settlement:', fetchError.message);
+          } else if (existingRows && existingRows.length > 0) {
+            const existingRow = existingRows[0];
+            const sellDate = new Date().toISOString().split('T')[0];
+            const { updatePayload, remainingRow } = buildSellSettlementPlan({
+              existingRow,
+              soldQuantity: Number(quantity),
+              sellDate,
+              sellPrice: normalizedOrderType === 'LIMIT' ? Number(price || 0) : null,
+            });
+
+            const { error: updateError } = await supabase
+              .from('stock_transactions')
+              .update(updatePayload)
+              .eq('id', transaction_id);
+
+            if (updateError) {
+              console.error('Error updating stock transaction for multi sell settlement:', updateError.message);
+            } else if (remainingRow) {
+              const { error: insertError } = await supabase
+                .from('stock_transactions')
+                .insert([remainingRow]);
+
+              if (insertError) {
+                console.error('Error inserting remaining stock transaction row after multi sell:', insertError.message);
+              }
+            }
+          }
+
+          const { data: existingPositions, error: queryError } = await supabase
+            .from('equity_positions')
+            .select('id')
+            .eq('account_id', account_id)
+            .eq('symbol', symbol)
+            .eq('quantity', quantity);
+
+          if (queryError) {
+            console.error('Error querying equity_positions:', queryError.message);
+          } else if (existingPositions && existingPositions.length > 0) {
+            const positionId = existingPositions[0].id;
+            const { error: deleteError } = await supabase
+              .from('equity_positions')
+              .delete()
+              .eq('id', positionId);
+
+            if (deleteError) {
+              console.error('Error deleting equity_positions row:', deleteError.message);
+            } else {
+              console.log(`Deleted equity_positions for ${symbol} (${account_id}) after sell order placement`);
+            }
+          } else {
+            console.log(`No equity_positions found for ${symbol} (${account_id}), proceeding with order`);
+          }
+
+          summary[brokerKey].success += 1;
+          totalSuccess += 1;
         } else {
           summary[brokerKey].failed += 1;
           summary[brokerKey].errors.push({ symbol, error: result.error || 'Order placement failed' });

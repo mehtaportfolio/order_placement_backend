@@ -13,6 +13,7 @@ let tokenToSymbolMap = {};
 let equityPositionSymbols = new Set();
 let isLoggingIn = false;
 let unknownSymbolsLogged = new Set();
+let smartWsOffLogged = false;
 
 const dynamicSubscriptions = new Map();
 
@@ -283,6 +284,9 @@ async function startAngelWS() {
     feedtype: feedToken
   });
 
+  // Reset the one-time "ws off" log flag when we create a new socket
+  smartWsOffLogged = false;
+
   smartWS.connect().then(async () => {
     // Refresh the in-memory list of equity position symbols
     await refreshEquityPositionSymbols();
@@ -439,7 +443,10 @@ const uniqueSymbolTokens = Array.from(
 async function resubscribeAllTokens() {
 
 if (!smartWS) {
-  console.warn('[Angel] smartWS is null, cannot resubscribe');
+  if (!smartWsOffLogged) {
+    console.warn('[Angel] WebSocket is off (outside market hours). Cannot fetch LTP for subscriptions.');
+    smartWsOffLogged = true;
+  }
   return;
 }
   const portfolioTokens = await getEquityPositionTokens();
@@ -526,7 +533,7 @@ if (!smartWS) {
   });
 }
 
-export async function subscribeSingleStock(symbol) {
+export async function subscribeSingleStock(symbol, options = {}) {
   try {
     // Already receiving ticks
     if (lastTicks[symbol]) {
@@ -534,30 +541,54 @@ export async function subscribeSingleStock(symbol) {
     }
 
     const normalized = normalizeSymbol(symbol);
+    const lookupExchange = options.exchange ? String(options.exchange).trim().toUpperCase() : '';
+    const lookupSymbol = options.stockName || symbol;
 
-    let { data, error } = await supabase
+    let data = null;
+    let error = null;
+
+    let query = supabase
       .from('stock_master')
       .select('stock_name, symbol_token, exchange')
-      .ilike('stock_name', normalized)
-      .single();
+      .ilike('stock_name', lookupSymbol);
 
-    if (error || !data) {
-      const { data: fallbackData, error: fallbackError } = await supabase
+    if (lookupExchange) {
+      query = query.ilike('exchange', lookupExchange);
+    }
+
+    ({ data, error } = await query.limit(1));
+
+    if (error || !data?.[0]) {
+      let fallbackQuery = supabase
         .from('stock_master')
         .select('stock_name, symbol_token, exchange')
-        .ilike('symbol', normalized)
-        .single();
+        .ilike('symbol', normalized);
 
-      if (fallbackError || !fallbackData) {
-        console.error('[Angel] Stock not found:', symbol);
+      if (lookupExchange) {
+        fallbackQuery = fallbackQuery.ilike('exchange', lookupExchange);
+      }
+
+      const fallbackResult = await fallbackQuery.limit(1);
+      data = fallbackResult.data;
+      error = fallbackResult.error;
+    }
+
+    if (error || !data?.[0]) {
+      if (!smartWS) {
+        if (!smartWsOffLogged) {
+          console.warn('[Angel] WebSocket is off (outside market hours). Cannot fetch LTP for selected stock.');
+          smartWsOffLogged = true;
+        }
         return false;
       }
 
-      data = fallbackData;
+      console.error('[Angel] Stock not found:', symbol);
+      return false;
     }
 
-    const token = data.symbol_token;
-    const exchange = (data.exchange || 'NSE').toUpperCase();
+    const stockRow = data[0];
+    const token = options.token || stockRow.symbol_token;
+    const exchange = (options.exchange || stockRow.exchange || 'NSE').toUpperCase();
 
     tokenToSymbolMap[token] = symbol;
 
@@ -587,7 +618,10 @@ dynamicSubscriptions.set(
 
 
 if (!smartWS) {
-  console.warn('[Angel] smartWS is null');
+  if (!smartWsOffLogged) {
+    console.warn('[Angel] WebSocket is off (outside market hours). Cannot fetch LTP for selected stock.');
+    smartWsOffLogged = true;
+  }
   return false;
 }
 
@@ -673,8 +707,7 @@ function handleTick(msg) {
           return;
         }
 
-        console.log('[Angel Tick]', rawToken, symbol, parseFloat(msg.last_traded_price) / 100);
-
+        
         const tick = {
             symbol,
             ltp: parseFloat(msg.last_traded_price) / 100

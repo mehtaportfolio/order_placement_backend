@@ -192,9 +192,11 @@ const { default: buyOrderRoutes } = await import('./routes/buyOrderRoutes.js');
 const { default: multiOrderRoutes } = await import('./routes/multiOrderRoutes.js');
 const { default: diagnosticsRoutes } = await import('./routes/diagnostics.js');
 const { default: zerodhaRoutes } = await import('./routes/zerodha.js');
+const { default: brokerSyncRoutes } = await import('./routes/brokerSyncRoutes.js');
 const { initializeStockMapping } = await import('./db/initStockMapping.js');
 const { initLivePriceServer, loginToAngel } = await import('./services/angelLiveService.js');
 const { getAngelStatus } = await import('./services/angelOneService.js');
+const { startOrderTracker } = await import('./services/orderTrackerService.js');
 
 // Attach only the routes needed by the equity order placement frontend
 app.use('/api/auth', authRoutes);
@@ -204,6 +206,7 @@ app.use('/api/order', orderRoutes);
 app.use('/api/buy-order', buyOrderRoutes);
 app.use('/api/diagnostics', diagnosticsRoutes);
 app.use('/api/zerodha', zerodhaRoutes);
+app.use('/api/broker-sync', brokerSyncRoutes);
 
 app.get('/api/health', async (req, res) => {
   const result = {
@@ -259,6 +262,12 @@ const server = app.listen(PORT, () => {
     loginToAngel();
   } catch (err) {
     console.error('[Startup] Error initializing equity live price services:', err);
+  }
+
+  try {
+    startOrderTracker();
+  } catch (err) {
+    console.error('[Startup] Error starting order tracker:', err.message);
   }
 
   (async () => {

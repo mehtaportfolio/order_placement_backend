@@ -297,6 +297,60 @@ async function placeSellOrder(accountId, symbol, quantity, orderType, price) {
 }
 
 // ===============================
+// GET ORDER HISTORY
+// ===============================
+async function getOrderHistory(accountId) {
+  try {
+    if (!accountId) throw new Error("Account is required");
+
+    const { fetchAllRows } = await import('../db/queries.js');
+    const { data: tokenDataArr } = await fetchAllRows(supabase, "zerodha_tokens", {
+      select: "access_token",
+      filters: [(q) => q.eq("account_id", accountId)],
+      limit: 1
+    });
+
+    const tokenData = tokenDataArr && tokenDataArr.length > 0 ? tokenDataArr[0] : null;
+
+    if (!tokenData) throw new Error("No access token found for Zerodha");
+
+    const kite = new KiteConnect({
+      api_key: getApiKey(accountId),
+      access_token: tokenData.access_token
+    });
+
+    const orders = await kite.getOrders();
+
+    return (orders || [])
+      .map((order) => {
+        const transactionType = String(order.transaction_type || order.order_type || '').trim().toUpperCase();
+        const normalizedType = transactionType === 'BUY' ? 'BUY' : transactionType === 'SELL' ? 'SELL' : null;
+
+        if (!normalizedType) {
+          return null;
+        }
+
+        return {
+          order_id: String(order.order_id || order.orderId || order.id || ''),
+          broker: 'zerodha',
+          account_id: accountId,
+          symbol: order.tradingsymbol || order.symbol || order.trading_symbol || order.instrument || '',
+          quantity: Number(order.filled_quantity ?? order.quantity ?? order.order_quantity ?? order.pending_quantity ?? 0),
+          price: Number(order.average_price ?? order.price ?? order.fill_price ?? order.trigger_price ?? 0),
+          status: order.status,
+          average_price: Number(order.average_price ?? order.price ?? order.fill_price ?? 0),
+          transaction_type: normalizedType,
+        };
+      })
+      .filter(Boolean)
+      .filter((order) => order.order_id && order.transaction_type === 'SELL');
+  } catch (err) {
+    console.error(`❌ Zerodha getOrderHistory error:`, err.message);
+    throw err;
+  }
+}
+
+// ===============================
 // GET ORDER STATUS
 // ===============================
 async function getOrderStatus(accountId, orderId) {
@@ -343,5 +397,6 @@ export {
   fetchAndAggregateTradesForAccount,
   placeBuyOrder,
   placeSellOrder,
+  getOrderHistory,
   getOrderStatus
 };
