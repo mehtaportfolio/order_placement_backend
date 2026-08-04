@@ -543,6 +543,7 @@ export async function subscribeSingleStock(symbol, options = {}) {
     const normalized = normalizeSymbol(symbol);
     const lookupExchange = options.exchange ? String(options.exchange).trim().toUpperCase() : '';
     const lookupSymbol = options.stockName || symbol;
+    const lookupStockName = normalizeSymbol(lookupSymbol);
 
     let data = null;
     let error = null;
@@ -550,28 +551,13 @@ export async function subscribeSingleStock(symbol, options = {}) {
     let query = supabase
       .from('stock_master')
       .select('stock_name, symbol_token, exchange')
-      .ilike('stock_name', lookupSymbol);
+      .ilike('stock_name', lookupStockName);
 
     if (lookupExchange) {
       query = query.ilike('exchange', lookupExchange);
     }
 
     ({ data, error } = await query.limit(1));
-
-    if (error || !data?.[0]) {
-      let fallbackQuery = supabase
-        .from('stock_master')
-        .select('stock_name, symbol_token, exchange')
-        .ilike('symbol', normalized);
-
-      if (lookupExchange) {
-        fallbackQuery = fallbackQuery.ilike('exchange', lookupExchange);
-      }
-
-      const fallbackResult = await fallbackQuery.limit(1);
-      data = fallbackResult.data;
-      error = fallbackResult.error;
-    }
 
     if (error || !data?.[0]) {
       if (!smartWS) {
@@ -644,12 +630,65 @@ console.log(
 
 return true;
 
- } catch (err) {
+  } catch (err) {
     console.error('[Angel] subscribeSingleStock error:', err);
     return false;
   }
 }
 
+export async function fetchFreshLivePrice(symbol, options = {}) {
+  try {
+    const lookupExchange = options.exchange ? String(options.exchange).trim().toUpperCase() : '';
+    const lookupSymbol = options.stockName || symbol;
+    const lookupStockName = normalizeSymbol(lookupSymbol);
+
+    let query = supabase
+      .from('stock_master')
+      .select('stock_name, symbol_token, exchange')
+      .ilike('stock_name', lookupStockName);
+
+    if (lookupExchange) {
+      query = query.ilike('exchange', lookupExchange);
+    }
+
+    const { data, error } = await query.limit(1);
+    if (error || !data?.[0]) {
+      return null;
+    }
+
+    const stockRow = data[0];
+    const token = String(options.token || stockRow.symbol_token || '').trim();
+    const exchange = (lookupExchange || stockRow.exchange || 'NSE').toUpperCase();
+    if (!token) {
+      return null;
+    }
+
+    const { fetchMarketDataChunked } = await import('./angelOneService.js');
+    const fetched = await fetchMarketDataChunked({ [exchange]: [token] });
+    if (!Array.isArray(fetched) || fetched.length === 0) {
+      return null;
+    }
+
+    const tick = fetched.find((item) => {
+      const itemToken = String(item.tk || item.token || item.symbolToken || item.exchangeToken || '');
+      return itemToken === token;
+    }) || fetched[0];
+
+    const ltp = Number(tick.ltp ?? tick.lastPrice ?? tick.close ?? tick.cmp ?? null);
+    if (Number.isNaN(ltp)) {
+      return null;
+    }
+
+    lastTicks[symbol] = { symbol, ltp };
+    lastTicks[normalizeSymbol(symbol)] = { symbol, ltp };
+    lastTicks[`${normalizeSymbol(symbol)}-EQ`] = { symbol, ltp };
+
+    return ltp;
+  } catch (err) {
+    console.error('[Angel] fetchFreshLivePrice error:', err?.message || err);
+    return null;
+  }
+}
 
 // --- TICK HANDLING ---
 async function updateEquityPositionLastPrice(symbol, lastPrice) {
@@ -716,6 +755,8 @@ function handleTick(msg) {
         const previousTick = lastTicks[symbol];
         const normalizedSymbol = normalizeSymbol(symbol);
 
+        const previousLtp = previousTick?.ltp ?? null;
+        
         // Cache tick under normalized and -EQ forms too, to support UI lookups
         lastTicks[symbol] = tick;
         lastTicks[normalizedSymbol] = tick;

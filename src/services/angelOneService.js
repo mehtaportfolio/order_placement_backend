@@ -196,9 +196,9 @@ export async function refreshStockSymbols() {
 }
 
 /**
- * Helper to fetch market data in chunks
+ * Sync Market Data (CMP & LCP)
  */
-async function fetchMarketDataChunked(exchangeTokens) {
+export async function fetchMarketDataChunked(exchangeTokens) {
     ensureSmartApi();
     const CHUNK_SIZE = 50;
     const allFetchedData = [];
@@ -213,7 +213,7 @@ async function fetchMarketDataChunked(exchangeTokens) {
                     mode: "FULL",
                     exchangeTokens: { [exch]: chunk }
                 });
-                
+
                 if (response.status && response.data && response.data.fetched) {
                     allFetchedData.push(...response.data.fetched);
                 } else {
@@ -235,9 +235,6 @@ async function fetchMarketDataChunked(exchangeTokens) {
     return allFetchedData;
 }
 
-/**
- * Sync Market Data (CMP & LCP)
- */
 export async function syncMarketData() {
     if (!sessionData) {
         log('Session missing. Attempting login...');

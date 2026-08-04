@@ -197,6 +197,9 @@ const { initializeStockMapping } = await import('./db/initStockMapping.js');
 const { initLivePriceServer, loginToAngel } = await import('./services/angelLiveService.js');
 const { getAngelStatus } = await import('./services/angelOneService.js');
 const { startOrderTracker } = await import('./services/orderTrackerService.js');
+const { default: surveillanceRoutes } = await import('./routes/surveillanceRoutes.js');
+const { startSurveillanceCron } = await import('./services/surveillance/surveillanceCron.js');
+
 
 // Attach only the routes needed by the equity order placement frontend
 app.use('/api/auth', authRoutes);
@@ -207,6 +210,7 @@ app.use('/api/buy-order', buyOrderRoutes);
 app.use('/api/diagnostics', diagnosticsRoutes);
 app.use('/api/zerodha', zerodhaRoutes);
 app.use('/api/broker-sync', brokerSyncRoutes);
+app.use('/api/surveillance', surveillanceRoutes);
 
 app.get('/api/health', async (req, res) => {
   const result = {
@@ -269,6 +273,15 @@ const server = app.listen(PORT, () => {
   } catch (err) {
     console.error('[Startup] Error starting order tracker:', err.message);
   }
+
+try {
+  startSurveillanceCron();
+} catch (err) {
+  console.error(
+    '[Startup] Error starting surveillance cron:',
+    err.message
+  );
+}
 
   (async () => {
     try {

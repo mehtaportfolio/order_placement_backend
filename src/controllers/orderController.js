@@ -2,8 +2,9 @@ import * as zerodhaService from '../services/zerodhaService.js';
 import * as angelService from '../services/angelOneService.js';
 import { fetchAllRows, deleteRows } from '../db/queries.js';
 import { supabase } from '../db/supabaseClient.js';
-import { getLivePrice as getAngelLivePrice, subscribeSingleStock} from '../services/angelLiveService.js';
+import { getLivePrice as getAngelLivePrice, subscribeSingleStock, fetchFreshLivePrice } from '../services/angelLiveService.js';
 import { buildSellSettlementPlan } from '../services/sellSettlementService.js';
+import { getSurveillanceRestrictionForOrder } from '../utils/surveillanceRestriction.js';
 
 /**
  * Get distinct brokers and accounts from stock_transactions
@@ -405,6 +406,15 @@ export async function placeSellOrder(req, res) {
       return res.status(400).json({ error: "Limit price is required for LIMIT orders" });
     }
 
+    const surveillanceRestriction = await getSurveillanceRestrictionForOrder({
+      symbol,
+      orderType: normalizedOrderType,
+    });
+
+    if (surveillanceRestriction.isRestricted) {
+      return res.status(400).json({ error: surveillanceRestriction.message });
+    }
+
     let result;
     const normalizedBroker = String(broker).trim().toLowerCase().replace(/\s+/g, '');
     if (normalizedBroker === 'zerodha') {
@@ -566,23 +576,31 @@ export const getLivePrice = async (req, res) => {
   const { symbol } = req.params;
   const { exchange } = req.query;
 
-  let ltp = getAngelLivePrice(symbol);
-
-  if (ltp == null) {
-    await subscribeSingleStock(symbol, { exchange, stockName: symbol });
-
+  const freshLtp = await fetchFreshLivePrice(symbol, { exchange, stockName: symbol });
+  if (freshLtp != null && !Number.isNaN(freshLtp)) {
     return res.json({
       success: true,
       symbol,
-      ltp: null,
-      subscribing: true
+      ltp: freshLtp
     });
   }
+
+  const cachedLtp = getAngelLivePrice(symbol);
+  if (cachedLtp != null && !Number.isNaN(cachedLtp)) {
+    return res.json({
+      success: true,
+      symbol,
+      ltp: cachedLtp
+    });
+  }
+
+  await subscribeSingleStock(symbol, { exchange, stockName: symbol });
 
   return res.json({
     success: true,
     symbol,
-    ltp
+    ltp: null,
+    subscribing: true
   });
 };
 

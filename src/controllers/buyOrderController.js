@@ -2,6 +2,7 @@ import { supabase } from '../db/supabaseClient.js';
 import * as zerodhaService from '../services/zerodhaService.js';
 import * as angelService from '../services/angelOneService.js';
 import { fetchAllRows } from '../db/queries.js';
+import { getSurveillanceRestrictionForOrder } from '../utils/surveillanceRestriction.js';
 
 const ALLOWED_ACCOUNTS = ['PM', 'PDM', 'PSM'];
 const ALLOWED_BROKERS = ['zerodha', 'angel'];
@@ -124,6 +125,15 @@ export async function placeBuyOrder(req, res) {
 
     if (order_type.toUpperCase() === 'LIMIT' && (!price || Number(price) <= 0)) {
       return res.status(400).json({ error: 'Limit price is required for LIMIT orders' });
+    }
+
+    const surveillanceRestriction = await getSurveillanceRestrictionForOrder({
+      symbol,
+      orderType: order_type.toUpperCase(),
+    });
+
+    if (surveillanceRestriction.isRestricted) {
+      return res.status(400).json({ error: surveillanceRestriction.message });
     }
 
     let result;

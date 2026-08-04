@@ -2,6 +2,7 @@ import { supabase } from '../db/supabaseClient.js';
 import * as zerodhaService from '../services/zerodhaService.js';
 import * as angelService from '../services/angelOneService.js';
 import { buildSellSettlementPlan } from '../services/sellSettlementService.js';
+import { getSurveillanceRestrictionForOrder } from '../utils/surveillanceRestriction.js';
 
 const ALLOWED_ACCOUNTS = ['PM', 'PDM', 'PSM'];
 const ALLOWED_BROKERS = ['zerodha', 'angel'];
@@ -79,6 +80,15 @@ export async function placeMultiBuyOrder(req, res) {
 
       if (order_type.toUpperCase() === 'LIMIT' && (!price || Number(price) <= 0)) {
         return res.status(400).json({ error: 'Limit price is required for LIMIT orders' });
+      }
+
+      const surveillanceRestriction = await getSurveillanceRestrictionForOrder({
+        symbol,
+        orderType: order_type.toUpperCase(),
+      });
+
+      if (surveillanceRestriction.isRestricted) {
+        return res.status(400).json({ error: surveillanceRestriction.message });
       }
     }
 
@@ -231,6 +241,18 @@ export async function placeMultiSellOrder(req, res) {
       const brokerKey = broker.toLowerCase();
       if (!summary[brokerKey]) {
         summary[brokerKey] = { success: 0, failed: 0, errors: [] };
+      }
+
+      const surveillanceRestriction = await getSurveillanceRestrictionForOrder({
+        symbol,
+        orderType: normalizedOrderType,
+      });
+
+      if (surveillanceRestriction.isRestricted) {
+        summary[brokerKey].failed += 1;
+        summary[brokerKey].errors.push({ symbol, error: surveillanceRestriction.message });
+        totalFailed += 1;
+        continue;
       }
 
       try {
