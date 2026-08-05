@@ -281,20 +281,17 @@ export async function placeMultiSellOrder(req, res) {
         }
 
         if (result.success) {
-          const shouldTrackBrokerOrder = String(order.transaction_type || '').trim().toUpperCase() === 'SELL';
-
-          if (shouldTrackBrokerOrder) {
-            const { error: orderError } = await supabase.from('broker_orders').insert([{
-              order_id: result.order_id,
-              broker,
-              account_id,
-              symbol,
-              quantity,
-              price: normalizedOrderType === 'LIMIT' ? price : null,
-              transaction_id,
-              status: 'OPEN',
-              created_at: new Date().toISOString(),
-            }]);
+          const { error: orderError } = await supabase.from('broker_orders').insert([{
+            order_id: result.order_id,
+            broker,
+            account_id,
+            symbol,
+            quantity,
+            price: normalizedOrderType === 'LIMIT' ? price : null,
+            transaction_id,
+            status: 'OPEN',
+            created_at: new Date().toISOString(),
+          }]);
 
             if (orderError) {
               console.error('Error storing broker order:', orderError.message);
@@ -303,7 +300,6 @@ export async function placeMultiSellOrder(req, res) {
               totalFailed += 1;
               continue;
             }
-          }
 
           const { data: existingRows, error: fetchError } = await supabase
             .from('stock_transactions')
