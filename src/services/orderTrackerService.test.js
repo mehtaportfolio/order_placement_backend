@@ -247,6 +247,61 @@ describe('syncBrokerOrdersFromHistory', () => {
     expect(insertedBrokerOrders).toHaveLength(0);
   });
 
+  it('skips an already-processed completed broker order when transaction is finalized', async () => {
+    const supabaseClient = {
+      from(table) {
+        if (table === 'stock_transactions') {
+          return {
+            select: () => createQueryBuilder([{ id: 77, sell_date: '2025-02-01', sell_price: 105 }]),
+            update: () => ({
+              eq: async () => ({ error: null }),
+            }),
+            insert: async () => ({ error: null, data: [] }),
+          };
+        }
+
+        if (table === 'broker_orders') {
+          return {
+            select: () => createQueryBuilder([{
+              id: 'order-123',
+              transaction_id: 77,
+              status: 'COMPLETED',
+              order_id: 'order-123',
+              broker: 'zerodha',
+              account_id: 'PM',
+              symbol: 'RELIANCE',
+              quantity: 10,
+            }]),
+            update: () => ({
+              eq: async () => ({ error: null }),
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected table: ${table}`);
+      },
+    };
+
+    const summary = await syncBrokerOrdersFromHistory({
+      supabaseClient,
+      historyItems: [{
+        order_id: 'order-123',
+        broker: 'zerodha',
+        account_id: 'PM',
+        symbol: 'RELIANCE',
+        quantity: 10,
+        price: 100,
+        status: 'COMPLETE',
+        average_price: 105,
+        transaction_type: 'SELL',
+      }],
+    });
+
+    expect(summary.inserted).toBe(0);
+    expect(summary.updated).toBe(0);
+    expect(summary.skipped).toBe(1);
+  });
+
   it('uses the order_id fallback when a newly inserted broker order has no id', async () => {
     const updatedRows = [];
     const updatedBrokerOrders = [];

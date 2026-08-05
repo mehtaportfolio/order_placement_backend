@@ -369,6 +369,15 @@ export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, h
             (txnCheck[0].sell_date !== null || txnCheck[0].sell_price !== null);
 
           if (isAlreadyFinalized) {
+            summary.skipped += 1;
+            summary.skippedReasons.push({
+              order_id: orderId,
+              reason: 'already-processed',
+              broker: normalizedBroker,
+              account_id: normalizedAccount,
+              symbol: normalizedSymbol,
+              quantity: normalizedQuantity,
+            });
             console.log(`[OrderTracker] Skipping re-finalization of broker_order ${orderId} (transaction already finalized)`);
           } else {
             const result = await finalizeCompletedOrder({
