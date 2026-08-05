@@ -3,7 +3,9 @@ import { fetchGSM } from './gsmService.js';
 import { fetchESM } from './esmService.js';
 import { fetchT2T } from './t2tService.js';
 import { fetchETF } from './etfService.js';
+import { fetchZerodhaApproved } from './zerodhaApprovedService.js';
 import { refreshSource } from './surveillanceRepository.js';
+
 
 async function syncSurveillanceModule(moduleName, sourceName, fetchFunction, refreshSourceImpl) {
   const records = await fetchFunction();
@@ -23,6 +25,7 @@ export async function runSurveillanceSync({
     esm: fetchESM,
     t2t: fetchT2T,
     etf: fetchETF,
+    zerodha: fetchZerodhaApproved,
   },
   refreshSourceImpl = refreshSource,
 } = {}) {
@@ -32,6 +35,7 @@ export async function runSurveillanceSync({
     { key: 'esm', label: 'ESM', source: 'ESM_API' },
     { key: 't2t', label: 'T2T', source: 'EQUITY_L' },
     { key: 'etf', label: 'ETF', source: 'ETF_API' },
+    { key: 'zerodha', label: 'ZERODHA', source: 'ZERODHA_API' },
   ];
 
   const results = {};

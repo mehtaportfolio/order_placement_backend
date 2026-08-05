@@ -199,6 +199,7 @@ const { getAngelStatus } = await import('./services/angelOneService.js');
 const { startOrderTracker } = await import('./services/orderTrackerService.js');
 const { default: surveillanceRoutes } = await import('./routes/surveillanceRoutes.js');
 const { startSurveillanceCron } = await import('./services/surveillance/surveillanceCron.js');
+const { default: initializeZerodhaScheduler } = await import('./services/zerodha/scheduler.js');
 
 
 // Attach only the routes needed by the equity order placement frontend
@@ -281,6 +282,12 @@ try {
     '[Startup] Error starting surveillance cron:',
     err.message
   );
+}
+
+try {
+  initializeZerodhaScheduler();
+} catch (err) {
+  console.error('[Startup] Error starting Zerodha scheduler:', err.message);
 }
 
   (async () => {
