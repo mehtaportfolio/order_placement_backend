@@ -277,27 +277,65 @@ export async function finalizeCompletedOrder({ supabaseClient = supabase, order,
   return { ok: true, originalRow, remainingQuantity };
 }
 
-export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, historyItems = [], broker = null, account_id = null } = {}) {
+
+export async function syncBrokerOrdersFromHistory({
+  supabaseClient = supabase,
+  historyItems = [],
+  broker = null,
+  account_id = null,
+} = {}) {
   const client = getEffectiveSupabaseClient(supabaseClient);
+
   if (!client) {
-    return { inserted: 0, updated: 0, skipped: 0, reason: 'missing-supabase-client' };
+    return {
+      inserted: 0,
+      updated: 0,
+      skipped: 0,
+      reason: 'missing-supabase-client',
+    };
   }
 
-  const summary = { inserted: 0, updated: 0, skipped: 0, skippedReasons: [] };
+  const summary = {
+    inserted: 0,
+    updated: 0,
+    skipped: 0,
+    skippedReasons: [],
+  };
 
-  if (!Array.isArray(historyItems)) {
+  if (!Array.isArray(historyItems) || historyItems.length === 0) {
     return summary;
   }
 
+  /*
+   * ---------------------------------------------------------
+   * STEP 1: Normalize history items and keep only SELL orders
+   * ---------------------------------------------------------
+   */
+  const normalizedItems = [];
+
   for (const item of historyItems) {
     const normalizedBroker = normalizeBrokerName(item.broker || broker);
-    const normalizedAccount = String(item.account_id || account_id || '').trim();
+    const normalizedAccount = String(
+      item.account_id || account_id || ''
+    ).trim();
     const normalizedSymbol = String(item.symbol || '').trim();
     const normalizedQuantity = Number(item.quantity || 0);
     const normalizedStatus = normalizeOrderStatus(item.status);
-    const orderId = String(item.order_id || item.orderId || '').trim();
-    const transactionType = String(item.transaction_type || item.order_type || '').trim().toUpperCase();
-    const isSellOrder = transactionType === 'SELL' || transactionType === 'S' || transactionType === 'SHORT';
+
+    const orderId = String(
+      item.order_id || item.orderId || ''
+    ).trim();
+
+    const transactionType = String(
+      item.transaction_type || item.order_type || ''
+    )
+      .trim()
+      .toUpperCase();
+
+    const isSellOrder =
+      transactionType === 'SELL' ||
+      transactionType === 'S' ||
+      transactionType === 'SHORT';
 
     if (!isSellOrder && transactionType) {
       summary.skipped += 1;
@@ -315,7 +353,7 @@ export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, h
     if (!orderId) {
       summary.skipped += 1;
       summary.skippedReasons.push({
-        order_id: orderId || null,
+        order_id: null,
         reason: 'missing-order-id',
         broker: normalizedBroker,
         account_id: normalizedAccount,
@@ -325,48 +363,182 @@ export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, h
       continue;
     }
 
+    normalizedItems.push({
+      item,
+      normalizedBroker,
+      normalizedAccount,
+      normalizedSymbol,
+      normalizedQuantity,
+      normalizedStatus,
+      orderId,
+    });
+  }
+
+  if (normalizedItems.length === 0) {
+    return summary;
+  }
+
+  /*
+   * ---------------------------------------------------------
+   * STEP 2: Bulk-load existing broker_orders
+   *
+   * IMPORTANT:
+   * broker_orders.order_id is UNIQUE, so a Map is safe here.
+   *
+   * Instead of:
+   *
+   *   SELECT broker_orders WHERE order_id = X
+   *   SELECT broker_orders WHERE order_id = Y
+   *   SELECT broker_orders WHERE order_id = Z
+   *
+   * we do one/few bulk queries.
+   * ---------------------------------------------------------
+   */
+
+  const orderIds = [
+    ...new Set(normalizedItems.map((entry) => entry.orderId)),
+  ];
+
+  const existingOrdersByOrderId = new Map();
+
+  // Supabase/PostgREST has a practical URL/query-size limit.
+  // Process order IDs in chunks so large history responses remain safe.
+  const ORDER_ID_CHUNK_SIZE = 50;
+
+  for (
+    let start = 0;
+    start < orderIds.length;
+    start += ORDER_ID_CHUNK_SIZE
+  ) {
+    const chunk = orderIds.slice(
+      start,
+      start + ORDER_ID_CHUNK_SIZE
+    );
+
     const { data: existingRows, error: existingError } = await client
       .from('broker_orders')
-      .select('id, transaction_id, status, order_id, broker, account_id, symbol, quantity')
-      .eq('order_id', orderId)
-      .limit(1);
+      .select(
+        'id, transaction_id, status, order_id, broker, account_id, symbol, quantity'
+      )
+      .in('order_id', chunk);
 
-    if (existingError) throw existingError;
+    if (existingError) {
+      throw existingError;
+    }
 
-    const existingOrder = existingRows?.[0] || null;
+    for (const existingOrder of existingRows || []) {
+      const existingOrderId = String(
+        existingOrder.order_id || ''
+      ).trim();
 
+      if (existingOrderId) {
+        existingOrdersByOrderId.set(
+          existingOrderId,
+          existingOrder
+        );
+      }
+    }
+  }
+
+  /*
+   * ---------------------------------------------------------
+   * STEP 3: Process history items
+   *
+   * Business logic below intentionally remains sequential.
+   *
+   * We do NOT use Promise.all() here because:
+   * - resolveTransactionIdForOrder() has matching logic
+   * - finalizeCompletedOrder() updates stock_transactions
+   * - partial quantities may be involved
+   * - transaction finalization must remain controlled
+   * ---------------------------------------------------------
+   */
+
+  for (const entry of normalizedItems) {
+    const {
+      item,
+      normalizedBroker,
+      normalizedAccount,
+      normalizedSymbol,
+      normalizedQuantity,
+      normalizedStatus,
+      orderId,
+    } = entry;
+
+    const existingOrder =
+      existingOrdersByOrderId.get(orderId) || null;
+
+    /*
+     * -------------------------------------------------------
+     * EXISTING BROKER ORDER
+     * -------------------------------------------------------
+     */
     if (existingOrder) {
-      const nextStatus = normalizeOrderStatus(existingOrder.status) === 'COMPLETED' ? 'COMPLETED' : normalizedStatus;
+      const nextStatus =
+        normalizeOrderStatus(existingOrder.status) === 'COMPLETED'
+          ? 'COMPLETED'
+          : normalizedStatus;
+
       if (existingOrder.status !== nextStatus) {
-        const updateTarget = getBrokerOrderUpdateTarget(existingOrder);
+        const updateTarget =
+          getBrokerOrderUpdateTarget(existingOrder);
+
         if (updateTarget) {
-          await client
+          const { error: updateError } = await client
             .from('broker_orders')
-            .update({ status: nextStatus, updated_at: new Date().toISOString() })
-            .eq(updateTarget.column, updateTarget.value);
+            .update({
+              status: nextStatus,
+              updated_at: new Date().toISOString(),
+            })
+            .eq(
+              updateTarget.column,
+              updateTarget.value
+            );
+
+          if (updateError) {
+            throw updateError;
+          }
+
           summary.updated += 1;
         }
       }
 
+      /*
+       * Existing COMPLETED order:
+       * make sure its stock transaction is finalized.
+       */
       if (nextStatus === 'COMPLETED') {
-        const transactionId = existingOrder.transaction_id || await resolveTransactionIdForOrder({
-          supabaseClient,
-          broker: normalizedBroker,
-          account_id: normalizedAccount,
-          symbol: normalizedSymbol,
-          quantity: normalizedQuantity,
-        });
+        const transactionId =
+          existingOrder.transaction_id ||
+          (await resolveTransactionIdForOrder({
+            supabaseClient,
+            broker: normalizedBroker,
+            account_id: normalizedAccount,
+            symbol: normalizedSymbol,
+            quantity: normalizedQuantity,
+          }));
 
         if (transactionId) {
-          // Check if transaction is already finalized to prevent duplicate insertions
-          const { data: txnCheck, error: txnCheckErr } = await client
+          /*
+           * Check whether stock transaction was already finalized.
+           */
+          const {
+            data: txnCheck,
+            error: txnCheckErr,
+          } = await client
             .from('stock_transactions')
             .select('id, sell_date, sell_price')
             .eq('id', transactionId)
             .limit(1);
 
-          const isAlreadyFinalized = !txnCheckErr && txnCheck?.length > 0 && 
-            (txnCheck[0].sell_date !== null || txnCheck[0].sell_price !== null);
+          if (txnCheckErr) {
+            throw txnCheckErr;
+          }
+
+          const isAlreadyFinalized =
+            txnCheck?.length > 0 &&
+            (txnCheck[0].sell_date !== null ||
+              txnCheck[0].sell_price !== null);
 
           if (isAlreadyFinalized) {
             summary.skipped += 1;
@@ -378,40 +550,63 @@ export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, h
               symbol: normalizedSymbol,
               quantity: normalizedQuantity,
             });
-            console.log(`[OrderTracker] Skipping re-finalization of broker_order ${orderId} (transaction already finalized)`);
+
+            console.log(
+              `[OrderTracker] Skipping re-finalization of broker_order ${orderId} (transaction already finalized)`
+            );
           } else {
-            const result = await finalizeCompletedOrder({
-              supabaseClient,
-              order: {
-                ...existingOrder,
-                transaction_id: transactionId,
-                quantity: normalizedQuantity,
-                price: item.average_price || item.price || 0,
-              },
-              statusData: {
-                average_price: item.average_price || item.price || 0,
-                status: nextStatus,
-              },
-            });
+            const result =
+              await finalizeCompletedOrder({
+                supabaseClient,
+                order: {
+                  ...existingOrder,
+                  transaction_id: transactionId,
+                  quantity: normalizedQuantity,
+                  price:
+                    item.average_price ||
+                    item.price ||
+                    0,
+                },
+                statusData: {
+                  average_price:
+                    item.average_price ||
+                    item.price ||
+                    0,
+                  status: nextStatus,
+                },
+              });
+
             if (result.ok) {
               summary.updated += 1;
             }
           }
         }
       }
+
       continue;
     }
 
-    const resolvedTransactionId = await resolveTransactionIdForOrder({
-      supabaseClient,
-      broker: normalizedBroker,
-      account_id: normalizedAccount,
-      symbol: normalizedSymbol,
-      quantity: normalizedQuantity,
-    });
+    /*
+     * -------------------------------------------------------
+     * NEW BROKER ORDER
+     * -------------------------------------------------------
+     */
 
-    if (!resolvedTransactionId && normalizedStatus === 'COMPLETED') {
+    const resolvedTransactionId =
+      await resolveTransactionIdForOrder({
+        supabaseClient,
+        broker: normalizedBroker,
+        account_id: normalizedAccount,
+        symbol: normalizedSymbol,
+        quantity: normalizedQuantity,
+      });
+
+    if (
+      !resolvedTransactionId &&
+      normalizedStatus === 'COMPLETED'
+    ) {
       summary.skipped += 1;
+
       summary.skippedReasons.push({
         order_id: orderId,
         reason: 'no-matching-stock-transaction-found',
@@ -420,8 +615,11 @@ export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, h
         symbol: normalizedSymbol,
         quantity: normalizedQuantity,
       });
+
       continue;
     }
+
+    const now = new Date().toISOString();
 
     const insertPayload = {
       order_id: orderId,
@@ -429,15 +627,24 @@ export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, h
       account_id: normalizedAccount,
       symbol: normalizedSymbol,
       quantity: normalizedQuantity,
-      price: item.average_price || item.price || null,
+      price:
+        item.average_price ||
+        item.price ||
+        null,
       transaction_id: resolvedTransactionId,
       status: normalizedStatus,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: now,
+      updated_at: now,
     };
 
-    if (existingOrder) {
+    /*
+     * Because order_id is UNIQUE, this should not normally
+     * happen after the bulk-load above. Keep the protection
+     * in case the same order appears twice in historyItems.
+     */
+    if (existingOrdersByOrderId.has(orderId)) {
       summary.skipped += 1;
+
       summary.skippedReasons.push({
         order_id: orderId,
         reason: 'duplicate-broker-order',
@@ -446,31 +653,71 @@ export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, h
         symbol: normalizedSymbol,
         quantity: normalizedQuantity,
       });
+
       continue;
     }
 
-    const { data: insertedRows, error: insertError } = await client
+    const {
+      data: insertedRows,
+      error: insertError,
+    } = await client
       .from('broker_orders')
-      .insert([insertPayload]);
+      .insert([insertPayload])
+      .select(
+        'id, transaction_id, status, order_id, broker, account_id, symbol, quantity'
+      );
 
-    if (insertError) throw insertError;
+    if (insertError) {
+      throw insertError;
+    }
 
-    const insertedOrder = insertedRows?.[0] || { id: null, ...insertPayload };
+    const insertedOrder =
+      insertedRows?.[0] || {
+        id: null,
+        ...insertPayload,
+      };
+
+    /*
+     * Add the newly inserted order to the Map.
+     *
+     * This protects against duplicate order IDs appearing
+     * later in the same historyItems array.
+     */
+    existingOrdersByOrderId.set(orderId, insertedOrder);
+
     summary.inserted += 1;
 
-    if (normalizedStatus === 'COMPLETED' && resolvedTransactionId) {
-      // Check if transaction is already finalized to prevent duplicate insertions
-      const { data: txnCheck, error: txnCheckErr } = await client
+    /*
+     * -------------------------------------------------------
+     * Finalize newly inserted COMPLETED order
+     * -------------------------------------------------------
+     */
+    if (
+      normalizedStatus === 'COMPLETED' &&
+      resolvedTransactionId
+    ) {
+      const {
+        data: txnCheck,
+        error: txnCheckErr,
+      } = await client
         .from('stock_transactions')
         .select('id, sell_date, sell_price')
         .eq('id', resolvedTransactionId)
         .limit(1);
 
-      const isAlreadyFinalized = !txnCheckErr && txnCheck?.length > 0 && 
-        (txnCheck[0].sell_date !== null || txnCheck[0].sell_price !== null);
+      if (txnCheckErr) {
+        throw txnCheckErr;
+      }
+
+      const isAlreadyFinalized =
+        txnCheck?.length > 0 &&
+        (txnCheck[0].sell_date !== null ||
+          txnCheck[0].sell_price !== null);
 
       if (isAlreadyFinalized) {
-        console.log(`[OrderTracker] Skipping finalization of new broker_order ${orderId} (transaction already finalized)`);
+        console.log(
+          `[OrderTracker] Skipping finalization of new broker_order ${orderId} (transaction already finalized)`
+        );
       } else {
         await finalizeCompletedOrder({
           supabaseClient,
@@ -478,10 +725,16 @@ export async function syncBrokerOrdersFromHistory({ supabaseClient = supabase, h
             ...insertedOrder,
             transaction_id: resolvedTransactionId,
             quantity: normalizedQuantity,
-            price: item.average_price || item.price || 0,
+            price:
+              item.average_price ||
+              item.price ||
+              0,
           },
           statusData: {
-            average_price: item.average_price || item.price || 0,
+            average_price:
+              item.average_price ||
+              item.price ||
+              0,
             status: normalizedStatus,
           },
         });
