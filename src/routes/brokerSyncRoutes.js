@@ -6,8 +6,6 @@ const router = express.Router();
 
 router.post('/sync-broker-history', async (req, res) => {
   try {
-    // Start the sync in the background.
-    // Do NOT await it here.
     syncBrokerOrdersFromBrokerAccounts()
       .then((summary) => {
         console.log('[BrokerSync] Background sync completed:', summary);
@@ -19,7 +17,6 @@ router.post('/sync-broker-history', async (req, res) => {
         );
       });
 
-    // Respond immediately to the frontend
     return res.status(202).json({
       success: true,
       message: 'Broker history sync started',
@@ -36,6 +33,7 @@ router.post('/sync-broker-history', async (req, res) => {
     });
   }
 });
+
 
 router.post('/surveillance', async (req, res) => {
   try {
