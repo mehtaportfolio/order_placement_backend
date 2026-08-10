@@ -787,6 +787,22 @@ export async function syncBrokerOrdersFromBrokerAccounts({ supabaseClient = supa
     for (const accountId of accounts) {
       try {
         const historyItems = await zerodhaService.getOrderHistory(accountId);
+
+console.log(
+  `[OrderTracker] Zerodha history for ${accountId}:`,
+  Array.isArray(historyItems)
+    ? `${historyItems.length} rows`
+    : typeof historyItems
+);
+
+console.log(
+  `[OrderTracker] First history item for ${accountId}:`,
+  Array.isArray(historyItems) && historyItems.length > 0
+    ? historyItems[0]
+    : historyItems
+);
+
+
         if (!Array.isArray(historyItems)) {
           summary.skipped += 1;
           continue;
