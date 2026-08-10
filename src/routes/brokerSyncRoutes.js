@@ -6,11 +6,34 @@ const router = express.Router();
 
 router.post('/sync-broker-history', async (req, res) => {
   try {
-    const summary = await syncBrokerOrdersFromBrokerAccounts();
-    res.json({ success: true, summary });
+    // Start the sync in the background.
+    // Do NOT await it here.
+    syncBrokerOrdersFromBrokerAccounts()
+      .then((summary) => {
+        console.log('[BrokerSync] Background sync completed:', summary);
+      })
+      .catch((error) => {
+        console.error(
+          '[BrokerSync] Background sync failed:',
+          error.message
+        );
+      });
+
+    // Respond immediately to the frontend
+    return res.status(202).json({
+      success: true,
+      message: 'Broker history sync started',
+    });
   } catch (error) {
-    console.error('[BrokerSync] Error syncing broker history:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error(
+      '[BrokerSync] Error starting broker history sync:',
+      error.message
+    );
+
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
   }
 });
 
