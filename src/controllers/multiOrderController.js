@@ -191,24 +191,32 @@ export async function placeMultiBuyOrder(req, res) {
   }
 }
 
-async function resolveAngelSymbolToken(symbol) {
+async function resolveStockMasterInstrument(symbol) {
   const stockName = (symbol || '').trim();
   if (!stockName) {
-    return { error: 'Stock symbol is required for Angel One orders' };
+    return { error: 'Stock symbol is required for sell orders' };
   }
 
-  const { data: tokenData, error: tokenError } = await supabase
+  const { data, error } = await supabase
     .from('stock_master')
-    .select('symbol_token')
+    .select('symbol_token, exchange')
     .eq('stock_name', stockName)
-    .limit(1)
-    .single();
+    .limit(1);
 
-  if (tokenError || !tokenData || !tokenData.symbol_token) {
-    return { error: tokenError?.message || `Angel One symbol token is missing for ${symbol}` };
+  const instrument = data?.[0];
+  if (error || !instrument) {
+    return { error: error?.message || `Stock ${stockName} is missing from stock_master` };
   }
 
-  return { token: tokenData.symbol_token.trim() };
+  const exchange = String(instrument.exchange || '').trim().toUpperCase();
+  if (!['NSE', 'BSE'].includes(exchange)) {
+    return { error: `Exchange is missing or invalid for ${stockName} in stock_master` };
+  }
+
+  return {
+    token: instrument.symbol_token ? String(instrument.symbol_token).trim() : null,
+    exchange,
+  };
 }
 
 export async function placeMultiSellOrder(req, res) {
@@ -257,24 +265,30 @@ export async function placeMultiSellOrder(req, res) {
 
       try {
         let result;
+        const { token, exchange, error: instrumentError } = await resolveStockMasterInstrument(symbol);
+        if (instrumentError) {
+          throw new Error(instrumentError);
+        }
+
         if (brokerKey === 'zerodha') {
           result = await zerodhaService.placeSellOrder(
             account_id,
             symbol,
             Number(quantity),
             normalizedOrderType,
-            normalizedOrderType === 'LIMIT' ? Number(price) : 0
+            normalizedOrderType === 'LIMIT' ? Number(price) : 0,
+            exchange
           );
         } else if (brokerKey === 'angel' || brokerKey === 'angelone') {
-          const { token, error: tokenError } = await resolveAngelSymbolToken(symbol);
-          if (tokenError) {
-            throw new Error(tokenError);
+          if (!token) {
+            throw new Error(`Angel One symbol token is missing for ${symbol}`);
           }
           result = await angelService.placeSellOrder(
             symbol,
             token,
             Number(quantity),
-            normalizedOrderType === 'LIMIT' ? Number(price) : 0
+            normalizedOrderType === 'LIMIT' ? Number(price) : 0,
+            exchange
           );
         } else {
           throw new Error(`Invalid broker: ${broker}`);

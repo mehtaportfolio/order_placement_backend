@@ -350,40 +350,32 @@ async function resolveTransactionIdForSell({ broker, account_id, symbol, quantit
   return data?.[0]?.id || null;
 }
 
-async function resolveAngelSymbolToken(symbol, exchange) {
+async function resolveStockMasterInstrument(symbol) {
   const stockName = (symbol || '').trim();
   if (!stockName) {
-    return { error: 'Stock symbol is required for Angel One orders' };
+    return { error: 'Stock symbol is required for sell orders' };
   }
 
-  let query = supabase
+  const { data, error } = await supabase
     .from('stock_master')
     .select('symbol_token, exchange')
-    .eq('stock_name', stockName);
+    .eq('stock_name', stockName)
+    .limit(1);
 
-  if (exchange) {
-    query = query.eq('exchange', String(exchange).trim().toUpperCase());
+  const instrument = data?.[0];
+  if (error || !instrument) {
+    return { error: error?.message || `Stock ${stockName} is missing from stock_master` };
   }
 
-  const { data, error } = await query.limit(1);
-  const tokenData = data?.[0];
-
-  if (error || !tokenData || !tokenData.symbol_token) {
-    const { data: fallbackData, error: fallbackError } = await supabase
-      .from('stock_master')
-      .select('symbol_token, exchange')
-      .eq('stock_name', stockName)
-      .limit(1);
-
-    const fallbackTokenData = fallbackData?.[0];
-    if (fallbackError || !fallbackTokenData || !fallbackTokenData.symbol_token) {
-      return { error: error?.message || fallbackError?.message || 'Angel One symbol token is missing for the selected stock in stock_master' };
-    }
-
-    return { token: fallbackTokenData.symbol_token.trim(), exchange: fallbackTokenData.exchange || exchange || null };
+  const resolvedExchange = String(instrument.exchange || '').trim().toUpperCase();
+  if (!['NSE', 'BSE'].includes(resolvedExchange)) {
+    return { error: `Exchange is missing or invalid for ${stockName} in stock_master` };
   }
 
-  return { token: tokenData.symbol_token.trim(), exchange: tokenData.exchange || exchange || null };
+  return {
+    token: instrument.symbol_token ? String(instrument.symbol_token).trim() : null,
+    exchange: resolvedExchange,
+  };
 }
 
 /**
@@ -391,7 +383,7 @@ async function resolveAngelSymbolToken(symbol, exchange) {
  */
 export async function placeSellOrder(req, res) {
   try {
-    const { broker, account_id, symbol, quantity, price, transaction_id, order_type, exchange, transaction_type } = req.body;
+    const { broker, account_id, symbol, quantity, price, transaction_id, order_type, transaction_type } = req.body;
 
     if (!broker || !account_id || !symbol || !quantity) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -417,15 +409,20 @@ export async function placeSellOrder(req, res) {
 
     let result;
     const normalizedBroker = String(broker).trim().toLowerCase().replace(/\s+/g, '');
+    const { token: resolvedToken, exchange: resolvedExchange, error: instrumentError } =
+      await resolveStockMasterInstrument(symbol);
+    if (instrumentError) {
+      return res.status(400).json({ error: instrumentError });
+    }
+
     if (normalizedBroker === 'zerodha') {
-      result = await zerodhaService.placeSellOrder(account_id, symbol, quantity, normalizedOrderType, price);
+      result = await zerodhaService.placeSellOrder(account_id, symbol, quantity, normalizedOrderType, price, resolvedExchange);
     } else if (normalizedBroker === 'angel' || normalizedBroker === 'angelone') {
-      const { token: resolvedToken, error: tokenError } = await resolveAngelSymbolToken(symbol, exchange);
-      if (tokenError) {
-        return res.status(400).json({ error: tokenError });
+      if (!resolvedToken) {
+        return res.status(400).json({ error: `Angel One symbol token is missing for ${symbol}` });
       }
 
-      result = await angelService.placeSellOrder(symbol, resolvedToken, quantity, price);
+      result = await angelService.placeSellOrder(symbol, resolvedToken, quantity, price, resolvedExchange);
     } else {
       return res.status(400).json({ error: "Invalid broker" });
     }

@@ -102,6 +102,19 @@ describe('placeSellOrder transaction resolution', () => {
         };
       }
 
+      if (table === 'stock_master') {
+        return {
+          select: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({
+              limit: jest.fn().mockResolvedValue({
+                data: [{ symbol_token: '12345', exchange: 'NSE' }],
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+
       return {
         select: jest.fn().mockReturnValue({
           eq: jest.fn().mockReturnValue({
@@ -137,6 +150,73 @@ describe('placeSellOrder transaction resolution', () => {
     expect(res.status).not.toHaveBeenCalledWith(409);
     expect(mockZerodhaService.placeSellOrder).toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+  });
+
+  it('forwards the selected exchange for BSE sell orders', async () => {
+    mockSupabase.from.mockImplementation((table) => {
+      if (table === 'stock_transactions') {
+        const transactionQuery = createQueryBuilder({ data: [{ id: 12382 }], error: null });
+        return {
+          select: jest.fn().mockReturnValue(transactionQuery),
+          update: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
+          insert: jest.fn().mockResolvedValue({ error: null }),
+        };
+      }
+
+      if (table === 'broker_orders') {
+        return { insert: jest.fn().mockResolvedValue({ error: null }) };
+      }
+
+      if (table === 'equity_positions') {
+        return {
+          select: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({
+              eq: jest.fn().mockReturnValue({
+                eq: jest.fn().mockResolvedValue({ data: [], error: null }),
+              }),
+            }),
+          }),
+          delete: jest.fn().mockReturnValue({ eq: jest.fn().mockResolvedValue({ error: null }) }),
+        };
+      }
+
+      if (table === 'stock_master') {
+        return {
+          select: jest.fn().mockReturnValue({
+            eq: jest.fn().mockReturnValue({
+              limit: jest.fn().mockResolvedValue({
+                data: [{ symbol_token: '12345', exchange: 'BSE' }],
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+
+      return { select: jest.fn() };
+    });
+
+    mockZerodhaService.placeSellOrder.mockResolvedValue({ success: true, order_id: 'bse-order-1' });
+
+    const req = {
+      body: {
+        broker: 'zerodha',
+        account_id: 'PDM',
+        symbol: 'AXTEL',
+        quantity: 1,
+        transaction_id: 12382,
+        order_type: 'LIMIT',
+        price: 100,
+        exchange: 'BSE',
+      },
+    };
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+
+    await placeSellOrder(req, res);
+
+    expect(mockZerodhaService.placeSellOrder).toHaveBeenCalledWith(
+      'PDM', 'AXTEL', 1, 'LIMIT', 100, 'BSE'
+    );
   });
 
   it('blocks market sell orders for trade-to-trade surveillance stocks', async () => {
