@@ -247,7 +247,7 @@ async function placeBuyOrder(accountId, symbol, quantity, orderType, price) {
 // ===============================
 // PLACE SELL ORDER
 // ===============================
-async function placeSellOrder(accountId, symbol, quantity, orderType, price) {
+async function placeSellOrder(accountId, symbol, quantity, orderType, price, exchange = 'NSE') {
   try {
     if (!accountId) throw new Error("Account is required");
 
@@ -267,8 +267,9 @@ async function placeSellOrder(accountId, symbol, quantity, orderType, price) {
       access_token: tokenData.access_token
     });
 
+    const normalizedExchange = String(exchange || 'NSE').trim().toUpperCase();
     const orderPayload = {
-      exchange: "NSE",
+      exchange: normalizedExchange === 'BSE' ? 'BSE' : 'NSE',
       tradingsymbol: symbol,
       transaction_type: "SELL",
       quantity: quantity,

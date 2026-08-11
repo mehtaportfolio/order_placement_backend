@@ -970,7 +970,7 @@ export async function placeBuyOrder(symbol, token, quantity, orderType, price) {
 /**
  * Place Sell Order via Angel One
  */
-export async function placeSellOrder(symbol, token, quantity, price) {
+export async function placeSellOrder(symbol, token, quantity, price, exchange = 'NSE') {
     ensureSmartApi();
     if (!sessionData) {
         const loginResult = await login();
@@ -978,12 +978,13 @@ export async function placeSellOrder(symbol, token, quantity, price) {
     }
 
     try {
+        const normalizedExchange = String(exchange || 'NSE').trim().toUpperCase();
         const response = await smartApi.placeOrder({
             variety: "NORMAL",
             tradingsymbol: symbol,
             symboltoken: token,
             transactiontype: "SELL",
-            exchange: "NSE",
+            exchange: normalizedExchange === 'BSE' ? 'BSE' : 'NSE',
             ordertype: "LIMIT",
             producttype: "DELIVERY",
             duration: "DAY",
