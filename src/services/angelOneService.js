@@ -602,65 +602,116 @@ export async function fetchTodayBuyTrades(options = {}) {
             ]
         });
 
-        // 3. CRITICAL FIX: Clean up duplicate symbol variations BEFORE comparison
-        // This handles cases where "ALPHA" and "ALPHA-EQ" both exist in DB
+        // 3. CRITICAL FIX: Canonicalize stored symbol variants BEFORE comparison
+        // This handles cases where "ALPHA" and "ALPHA-EQ" both exist in DB and ensures
+        // later update queries match the normalized symbol that the API returns.
         const symbolNormalizationMap = new Map();
         const recordsToDelete = [];
-        
+        const symbolsToNormalize = [];
+
         if (existingToday && existingToday.length > 0) {
             existingToday.forEach((record) => {
                 const normalizedSymbol = normalizeSymbol(record.symbol);
-                if (!symbolNormalizationMap.has(normalizedSymbol)) {
-                    symbolNormalizationMap.set(normalizedSymbol, record);
-                } else {
-                    // Duplicate variant found - mark for deletion
-                    recordsToDelete.push(record.id);
-                    log(`Removing duplicate symbol variant: "${record.symbol}" (normalizes to "${normalizedSymbol}")`, 'WARN');
+                const existing = symbolNormalizationMap.get(normalizedSymbol);
+
+                if (!existing) {
+                    symbolNormalizationMap.set(normalizedSymbol, {
+                        ...record,
+                        symbol: normalizedSymbol
+                    });
+
+                    if (record.symbol !== normalizedSymbol) {
+                        symbolsToNormalize.push({ id: record.id, symbol: normalizedSymbol });
+                    }
+                    return;
                 }
+
+                recordsToDelete.push(record.id);
+                log(`Removing duplicate symbol variant: "${record.symbol}" (normalizes to "${normalizedSymbol}")`, 'WARN');
             });
-            
-            // Delete duplicate symbol variants
+
+            if (symbolsToNormalize.length > 0) {
+                for (const item of symbolsToNormalize) {
+                    const { error: normalizeError } = await updateRows(supabase, 'equity_positions', {
+                        symbol: item.symbol,
+                        fetched_at: new Date().toISOString()
+                    }, (q) => q.eq('id', item.id));
+
+                    if (normalizeError) {
+                        log(`Error normalizing symbol for id=${item.id}: ${normalizeError.message}`, 'ERROR');
+                    }
+                }
+            }
+
             if (recordsToDelete.length > 0) {
                 await deleteRows(supabase, 'equity_positions', (q) => q.in('id', recordsToDelete));
                 log(`Cleaned up ${recordsToDelete.length} duplicate symbol variant(s)`, 'INFO');
             }
         }
 
-        const { inserts: dataToInsert, updates: dataToUpdate } = buildPositionSyncPlan(formatted, Array.from(symbolNormalizationMap.values()), options);
+        const canonicalExisting = Array.from(symbolNormalizationMap.values());
+        const { inserts: dataToInsert, updates: dataToUpdate } = buildPositionSyncPlan(formatted, canonicalExisting, options);
 
         let insertedCount = 0;
         let updatedCount = 0;
 
-        // Prepare data for upsert with normalized symbols
-        const dataForUpsert = [...dataToInsert, ...dataToUpdate].map(item => ({
-            ...item,
-            symbol: normalizeSymbol(item.symbol),  // Ensure symbol is normalized
-            broker: "angel",
-            account_id: clientId,
-            product: 'DELIVERY',
-            exchange: 'NSE',
-            pnl: 0,
-            position_date: today,
-            fetched_at: new Date().toISOString()
-        }));
+        if (dataToInsert.length > 0) {
+            const normalizedInserts = dataToInsert.map(item => ({
+                ...item,
+                symbol: normalizeSymbol(item.symbol),
+                broker: 'angel',
+                account_id: clientId,
+                product: 'DELIVERY',
+                exchange: 'NSE',
+                pnl: 0,
+                position_date: today,
+                fetched_at: new Date().toISOString()
+            }));
 
-        if (dataForUpsert.length > 0) {
-            // UPSERT on (account_id, position_date, symbol) composite key
-            // This prevents duplicate inserts even on concurrent syncs
-            const { error: upsertError, data: upsertedRows } = await upsertRows(
-                supabase, 
-                'equity_positions', 
-                dataForUpsert, 
-                { onConflict: 'account_id,position_date,symbol' }
-            );
-
-            if (upsertError) {
-                log(`Error upserting positions: ${upsertError.message}`, 'ERROR');
+            const { error: insertError } = await insertRows(supabase, 'equity_positions', normalizedInserts);
+            if (insertError) {
+                log(`Error inserting trades: ${insertError.message}`, 'ERROR');
             } else {
-                // Count inserts vs updates by comparing with what we tried to insert
-                insertedCount = dataToInsert.length;
-                updatedCount = dataToUpdate.length;
-                log(`✅ Upserted ${dataForUpsert.length} positions for ${clientId} (${insertedCount} new, ${updatedCount} updated).`);
+                log(`✅ Inserted ${normalizedInserts.length} new net positions for ${clientId}.`);
+                insertedCount = normalizedInserts.length;
+            }
+        }
+
+        if (dataToUpdate.length > 0) {
+            for (const item of dataToUpdate) {
+                const normalizedItem = {
+                    ...item,
+                    symbol: normalizeSymbol(item.symbol),
+                    broker: 'angel',
+                    account_id: clientId,
+                    product: 'DELIVERY',
+                    exchange: 'NSE',
+                    pnl: 0,
+                    position_date: today,
+                    fetched_at: new Date().toISOString()
+                };
+
+                const { error: updateError } = await updateRows(supabase, 'equity_positions', {
+                    quantity: normalizedItem.quantity,
+                    average_price: normalizedItem.average_price,
+                    fetched_at: normalizedItem.fetched_at,
+                    last_price: normalizedItem.last_price ?? 0,
+                    broker: normalizedItem.broker,
+                    product: normalizedItem.product,
+                    exchange: normalizedItem.exchange,
+                    pnl: normalizedItem.pnl ?? 0
+                }, (q) => q.match({
+                    account_id: clientId,
+                    position_date: today,
+                    symbol: normalizedItem.symbol
+                }));
+
+                if (updateError) {
+                    log(`Error updating trades: ${updateError.message}`, 'ERROR');
+                } else {
+                    log(`✅ Updated net position for ${normalizedItem.symbol} (${clientId}).`);
+                    updatedCount++;
+                }
             }
         }
 
