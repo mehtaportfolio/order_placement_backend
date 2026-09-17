@@ -58,6 +58,138 @@ export async function getStockMasterFull(req, res) {
   }
 }
 
+export async function getStockDetailStockSuggestions(req, res) {
+  try {
+    const search = String(req.query.search || '').trim()
+
+    if (!search) {
+      return res.json({ stocks: [] })
+    }
+
+    const { data, error } = await fetchAllRows(supabase, 'stock_mapping', {
+      select: 'stock_name',
+      filters: [(query) => query.ilike('stock_name', `%${search}%`)],
+      order: { column: 'stock_name', ascending: true },
+      limit: 20,
+    })
+
+    if (error) {
+      return res.status(500).json({ error: error.message || 'Failed to fetch stock suggestions' })
+    }
+
+    res.json({ stocks: (data || []).map((row) => row.stock_name).filter(Boolean) })
+  } catch (err) {
+    console.error('[BuyOrder] getStockDetailStockSuggestions error:', err.message)
+    res.status(500).json({ error: err.message || 'Internal error' })
+  }
+}
+
+export async function getStockDetails(req, res) {
+  try {
+    const stockName = String(req.query.stock_name || '').trim()
+    const status = String(req.query.status || 'open').trim().toLowerCase()
+
+    if (!stockName) {
+      return res.status(400).json({ error: 'stock_name is required' })
+    }
+
+    if (!['open', 'close'].includes(status)) {
+      return res.status(400).json({ error: 'status must be open or close' })
+    }
+
+    const [{ data: mappingRows, error: mappingError }, { data: transactions, error: transactionError }] = await Promise.all([
+      fetchAllRows(supabase, 'stock_mapping', {
+        select: 'stock_name, cmp',
+        filter: { stock_name: stockName },
+        limit: 1,
+      }),
+      fetchAllRows(supabase, 'stock_transactions', {
+        select: 'quantity, buy_price, sell_price, sell_date',
+        filters: [
+          (query) => query.eq('stock_name', stockName),
+          (query) => status === 'open' ? query.is('sell_date', null) : query.not('sell_date', 'is', null),
+        ],
+        chunkSize: 1000,
+      }),
+    ])
+
+    if (mappingError) {
+      return res.status(500).json({ error: mappingError.message || 'Failed to fetch stock mapping' })
+    }
+
+    if (transactionError) {
+      return res.status(500).json({ error: transactionError.message || 'Failed to fetch stock transactions' })
+    }
+
+    const mapping = mappingRows?.[0]
+    if (!mapping) {
+      return res.status(404).json({ error: 'Stock not found in stock_mapping' })
+    }
+
+    const totals = (transactions || []).reduce((result, transaction) => {
+      const quantity = Number(transaction.quantity) || 0
+      const buyPrice = Number(transaction.buy_price) || 0
+      const sellPrice = Number(transaction.sell_price) || 0
+
+      result.quantity += quantity
+      result.buyValue += quantity * buyPrice
+      result.sellValue += quantity * sellPrice
+      return result
+    }, { quantity: 0, buyValue: 0, sellValue: 0 })
+
+    const avgBuyPrice = totals.quantity > 0 ? totals.buyValue / totals.quantity : 0
+    const avgSellPrice = totals.quantity > 0 ? totals.sellValue / totals.quantity : 0
+    const currentPrice = Number(mapping.cmp) || 0
+    const pnl = status === 'open'
+      ? (currentPrice * totals.quantity) - totals.buyValue
+      : totals.sellValue - totals.buyValue
+    const pnlPercent = totals.buyValue > 0 ? (pnl / totals.buyValue) * 100 : 0
+
+    res.json({
+      stock_name: mapping.stock_name,
+      status,
+      total_quantity: totals.quantity,
+      avg_buy_price: avgBuyPrice,
+      avg_sell_price: status === 'close' ? avgSellPrice : null,
+      cmp: status === 'open' ? currentPrice : null,
+      total_pnl: pnl,
+      pnl_percent: pnlPercent,
+    })
+  } catch (err) {
+    console.error('[BuyOrder] getStockDetails error:', err.message)
+    res.status(500).json({ error: err.message || 'Internal error' })
+  }
+}
+
+export async function getStockMasterDetails(req, res) {
+  try {
+    const stockName = String(req.query.stock_name || '').trim()
+
+    if (!stockName) {
+      return res.status(400).json({ error: 'stock_name is required' })
+    }
+
+    const { data, error } = await fetchAllRows(supabase, 'stock_master', {
+      select: 'stock_name, industry, sector, category, macro_sector, known_sector, basic_industry, isin, s_broad_sector, s_sector, s_broad_industry, s_industry',
+      filter: { stock_name: stockName },
+      limit: 1,
+    })
+
+    if (error) {
+      return res.status(500).json({ error: error.message || 'Failed to fetch stock master details' })
+    }
+
+    if (!data?.[0]) {
+      return res.status(404).json({ error: 'Stock not found in stock_master' })
+    }
+
+    res.json(data[0])
+  } catch (err) {
+    console.error('[BuyOrder] getStockMasterDetails error:', err.message)
+    res.status(500).json({ error: err.message || 'Internal error' })
+  }
+}
+
 export async function getSymbolToken(req, res) {
   try {
     const { stock_name, exchange } = req.query;

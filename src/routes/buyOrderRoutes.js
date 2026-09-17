@@ -11,6 +11,9 @@ router.post('/save-positions', buyOrderController.savePositionsToTransactions);
 router.post('/sync-positions', buyOrderController.syncOpenPositions);
 router.post('/place-buy-order', buyOrderController.placeBuyOrder);
 router.get('/stock-master-full', buyOrderController.getStockMasterFull);
+router.get('/stock-details/stocks', buyOrderController.getStockDetailStockSuggestions);
+router.get('/stock-details/master', buyOrderController.getStockMasterDetails);
+router.get('/stock-details', buyOrderController.getStockDetails);
 router.get('/symbol-token', buyOrderController.getSymbolToken);
 
 export default router;
