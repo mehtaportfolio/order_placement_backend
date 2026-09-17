@@ -149,9 +149,12 @@ export async function getStockDetails(req, res) {
       stock_name: mapping.stock_name,
       status,
       total_quantity: totals.quantity,
+      total_invested_value: totals.buyValue,
       avg_buy_price: avgBuyPrice,
       avg_sell_price: status === 'close' ? avgSellPrice : null,
       cmp: status === 'open' ? currentPrice : null,
+      total_sell_value: status === 'close' ? totals.sellValue : null,
+      total_market_value: status === 'open' ? currentPrice * totals.quantity : null,
       total_pnl: pnl,
       pnl_percent: pnlPercent,
     })
@@ -186,6 +189,40 @@ export async function getStockMasterDetails(req, res) {
     res.json(data[0])
   } catch (err) {
     console.error('[BuyOrder] getStockMasterDetails error:', err.message)
+    res.status(500).json({ error: err.message || 'Internal error' })
+  }
+}
+
+export async function getStockTransactions(req, res) {
+  try {
+    const stockName = String(req.query.stock_name || '').trim()
+    const status = String(req.query.status || 'open').trim().toLowerCase()
+
+    if (!stockName) {
+      return res.status(400).json({ error: 'stock_name is required' })
+    }
+
+    if (!['open', 'close'].includes(status)) {
+      return res.status(400).json({ error: 'status must be open or close' })
+    }
+
+    const { data, error } = await fetchAllRows(supabase, 'stock_transactions', {
+      select: '*',
+      filters: [
+        (query) => query.eq('stock_name', stockName),
+        (query) => status === 'open' ? query.is('sell_date', null) : query.not('sell_date', 'is', null),
+      ],
+      order: { column: 'buy_date', ascending: true },
+      chunkSize: 1000,
+    })
+
+    if (error) {
+      return res.status(500).json({ error: error.message || 'Failed to fetch stock transactions' })
+    }
+
+    res.json({ stock_name: stockName, status, transactions: data || [] })
+  } catch (err) {
+    console.error('[BuyOrder] getStockTransactions error:', err.message)
     res.status(500).json({ error: err.message || 'Internal error' })
   }
 }
